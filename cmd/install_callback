@@ -1,0 +1,21 @@
+#!/bin/bash
+# Docker备份 - 安装后回调
+LOG_FILE="${TRIM_TEMP_LOGFILE:-/tmp/dockerbackup-install.log}"
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}" 2>/dev/null; }
+
+log_msg "安装回调开始"
+mkdir -p "${TRIM_PKGVAR}/data/backups" "${TRIM_PKGVAR}/data/tasks" 2>/dev/null
+chmod +x "${TRIM_APPDEST}/server/server.py" 2>/dev/null
+
+if command -v docker >/dev/null 2>&1; then
+    log_msg "docker 可用: $(docker --version 2>&1 | head -n 1)"
+else
+    log_msg "警告: 未检测到 docker 命令"
+fi
+if command -v python3 >/dev/null 2>&1; then
+    log_msg "python3 可用: $(python3 --version 2>&1)"
+else
+    log_msg "警告: 未检测到 python3"
+fi
+log_msg "安装回调完成"
+exit 0

@@ -1,0 +1,3 @@
+#!/bin/bash
+mkdir -p "${TRIM_PKGVAR}/data/backups" 2>/dev/null
+exit 0

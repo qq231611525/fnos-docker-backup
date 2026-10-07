@@ -1,0 +1,9 @@
+#!/bin/bash
+# Docker备份 - 升级回调
+LOG_FILE="${TRIM_TEMP_LOGFILE:-/tmp/dockerbackup-upgrade.log}"
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}" 2>/dev/null; }
+log_msg "升级回调开始"
+chmod +x "${TRIM_APPDEST}/server/server.py" 2>/dev/null
+mkdir -p "${TRIM_PKGVAR}/data/backups" "${TRIM_PKGVAR}/data/tasks" 2>/dev/null
+log_msg "升级回调完成（备份文件已保留）"
+exit 0

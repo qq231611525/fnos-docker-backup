@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Docker备份</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#f0f2f5;color:#333;font-size:14px}
+header{background:#1a2b3c;color:#fff;padding:14px 20px;display:flex;align-items:center;gap:10px}
+header h1{font-size:17px;font-weight:600}
+.badge{font-size:12px;padding:2px 10px;border-radius:10px;background:#555}
+.badge.ok{background:#1a9c5b}.badge.bad{background:#d33}
+main{max-width:960px;margin:0 auto;padding:16px}
+.card{background:#fff;border-radius:8px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card h2{font-size:15px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #eee}
+th{color:#888;font-weight:500;background:#fafafa}
+tr:hover td{background:#f7fbff}
+.mono{font-family:Consolas,Menlo,monospace;font-size:12px;word-break:break-all}
+.btn{display:inline-block;border:none;border-radius:6px;padding:9px 20px;font-size:14px;cursor:pointer;background:#2468d8;color:#fff}
+.btn:hover{background:#1c55b5}
+.btn:disabled{background:#aaa;cursor:not-allowed}
+.btn.green{background:#1a9c5b}.btn.green:hover{background:#157f4a}
+.btn.red{background:#d33}.btn.red:hover{background:#b22}
+.btn.small{padding:5px 12px;font-size:12px}
+.toolbar{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center}
+.progress{height:8px;background:#e8e8e8;border-radius:4px;overflow:hidden;margin-top:10px;display:none}
+.progress>div{height:100%;background:#2468d8;width:0%;transition:width .3s}
+.phase{font-size:13px;color:#666;margin-top:6px;min-height:18px}
+.tabs{display:flex;gap:8px;margin-bottom:14px}
+.tab{padding:8px 18px;border-radius:6px;background:#fff;cursor:pointer;border:1px solid #ddd;font-size:14px}
+.tab.active{background:#1a2b3c;color:#fff;border-color:#1a2b3c}
+.hidden{display:none}
+.filelist{font-size:13px}
+.filelist .row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #eee;flex-wrap:wrap}
+pre{background:#1a2b3c;color:#c8e6c9;padding:12px;border-radius:6px;font-size:12px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all}
+.warn{color:#b26a00;background:#fff7e6;padding:8px 12px;border-radius:6px;font-size:13px;margin-top:8px}
+.err{color:#d33;background:#fdecea;padding:8px 12px;border-radius:6px;font-size:13px;margin-top:8px}
+.hint{font-size:12px;color:#888;margin-top:6px}
+input[type=file]{font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🐳 Docker 完整备份</h1>
+  <span class="badge" id="dockerBadge">检测中…</span>
+</header>
+<main>
+  <div class="tabs">
+    <div class="tab active" onclick="showTab('backup')">备份</div>
+    <div class="tab" onclick="showTab('files')">备份文件</div>
+    <div class="tab" onclick="showTab('restore')">恢复</div>
+  </div>
+
+  <!-- 备份 -->
+  <div id="tab-backup">
+    <div class="card">
+      <h2>容器 <span class="hint">勾选容器会自动带上它的镜像、命名卷和宿主机目录(bind挂载)</span></h2>
+      <table><thead><tr><th></th><th>名称</th><th>镜像</th><th>状态</th></tr></thead>
+      <tbody id="ctBody"><tr><td colspan="4">加载中…</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h2>镜像</h2>
+      <table><thead><tr><th></th><th>仓库:标签</th><th>大小</th></tr></thead>
+      <tbody id="imgBody"><tr><td colspan="3">加载中…</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h2>数据卷 <button class="btn small red" onclick="pruneVolumes()">清理所有孤立卷</button></h2>
+      <table><thead><tr><th></th><th>名称</th><th>占用容器</th><th>驱动</th><th>操作</th></tr></thead>
+      <tbody id="volBody"><tr><td colspan="5">加载中…</td></tr></tbody></table>
+      <div class="toolbar">
+        <label><input type="checkbox" id="snapshotCk" checked> 快照容器文件系统（保存容器内改过的配置文件）</label>
+      </div>
+      <div class="toolbar">
+        <button class="btn" id="backupBtn" onclick="startBackup()">开始备份</button>
+      </div>
+      <div class="progress" id="bkProg"><div></div></div>
+      <div class="phase" id="bkPhase"></div>
+      <div id="bkResult"></div>
+    </div>
+  </div>
+
+  <!-- 备份文件 -->
+  <div id="tab-files" class="hidden">
+    <div class="card">
+      <h2>备份文件 <button class="btn small" onclick="loadBackups()">刷新</button></h2>
+      <div class="filelist" id="fileList">加载中…</div>
+      <div class="hint">备份包下载后拿到另一台机器，在「恢复」页上传即可导入使用。</div>
+    </div>
+  </div>
+
+  <!-- 恢复 -->
+  <div id="tab-restore" class="hidden">
+    <div class="card">
+      <h2>上传备份包恢复</h2>
+      <input type="file" id="upFile" accept=".tar.gz,.tgz">
+      <div style="margin-top:10px"><label><input type="checkbox" id="recreateCk" checked onchange="$('forceCk').disabled=!this.checked"> 恢复完成后自动重建容器</label></div>
+      <div style="margin-top:6px"><label><input type="checkbox" id="forceCk"> 同名容器已存在时，先删除再重建（危险：会停掉正在运行的容器）</label></div>
+      <div class="toolbar"><button class="btn green" onclick="startRestore()">上传并恢复</button></div>
+      <div class="progress" id="rsProg"><div></div></div>
+      <div class="phase" id="rsPhase"></div>
+      <div id="rsResult"></div>
+      <div class="hint">恢复会导入镜像、还原数据卷。勾选自动重建容器后，会按备份时的配置自动 docker run 启动容器（同名容器已存在时会跳过）。</div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+// 网关前缀自适应：页面在 /app/dockerbackup/ 下，API 用相对路径避免绕过网关
+const BASE=(()=>{let p=window.location.pathname;return p.endsWith('/')?p:p+'/';})();
+let containers=[], images=[], volumes=[];
+let containerBinds={};  // container idx -> [{source,destination}]
+
+function showTab(t){
+  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+  event.target.classList.add('active');
+  ['backup','files','restore'].forEach(x=>$('tab-'+x).classList.toggle('hidden',x!==t));
+  if(t==='files') loadBackups();
+}
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function fmtSize(b){if(b>1e9)return (b/1e9).toFixed(2)+' GB';if(b>1e6)return (b/1e6).toFixed(1)+' MB';return (b/1e3).toFixed(0)+' KB'}
+
+async function api(p,opt){const r=await fetch(BASE+p.replace(/^\//,''),opt);return r.json()}
+
+async function init(){
+  const st=await api('api/status');
+  const b=$('dockerBadge');
+  if(st.docker){b.textContent='Docker '+esc(st.version||'可用');b.className='badge ok'}else{b.textContent='Docker 不可用';b.className='badge bad';return}
+  const [ct,im,vo]=await Promise.all([api('api/containers'),api('api/images'),api('api/volumes')]);
+  containers=ct.items||[];images=im.items||[];volumes=vo.items||[];
+  $('ctBody').innerHTML=containers.map((c,i)=>{
+    const name=(c.Names||'').replace(/,/g,' ');
+    return `<tr><td><input type="checkbox" data-i="${i}" onchange="onCt(this)"></td><td class="mono">${esc(name)}</td><td class="mono">${esc(c.Image)}</td><td>${esc(c.State)}</td></tr>`;
+  }).join('')||'<tr><td colspan="4">无容器</td></tr>';
+  $('imgBody').innerHTML=images.map((g,i)=>{
+    const tag=g.Repository+':'+g.Tag;
+    return `<tr><td><input type="checkbox" data-tag="${esc(tag)}" class="imgCk"></td><td class="mono">${esc(tag)}</td><td>${esc(g.Size)}</td></tr>`;
+  }).join('')||'<tr><td colspan="3">无镜像</td></tr>';
+  $('volBody').innerHTML=volumes.map((v,i)=>{
+    const used=(v.used_by||[]);
+    const usedHtml=used.length?used.map(u=>`<span class="mono">${esc(u)}</span>`).join(', '):'<span class="hint">无容器使用(孤立)</span>';
+    const delBtn=used.length?'':`<button class="btn small red" onclick="rmVolume('${esc(v.Name)}')">删除</button>`;
+    return `<tr><td><input type="checkbox" data-n="${esc(v.Name)}" class="volCk"></td><td class="mono">${esc(v.Name)}</td><td>${usedHtml}</td><td>${esc(v.Driver)}</td><td>${delBtn}</td></tr>`;
+  }).join('')||'<tr><td colspan="5">无数据卷</td></tr>';
+}
+async function rmVolume(n){
+  if(!confirm('删除数据卷 '+n+' ?\n卷内数据将永久丢失!'))return;
+  const r=await api('api/volume-rm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})});
+  if(r.ok){init()}else{alert('删除失败: '+(r.error||''))}
+}
+async function pruneVolumes(){
+  if(!confirm('清理所有无容器使用的数据卷?\n这些卷内数据将永久丢失!'))return;
+  const r=await api('api/volume-prune',{method:'POST'});
+  if(r.ok){alert('清理完成');init()}else{alert('清理失败: '+(r.error||''))}
+}
+
+async function onCt(cb){
+  const i=+cb.dataset.i, c=containers[i];if(!c)return;
+  const info=await api('api/container-volumes?name='+encodeURIComponent((c.Names||'').split(',')[0]));
+  const imgTag=c.Image;
+  document.querySelectorAll('.imgCk').forEach(e=>{if(e.dataset.tag===imgTag||e.dataset.tag.startsWith(imgTag+':'))e.checked=cb.checked});
+  (info.volumes||[]).forEach(v=>{document.querySelectorAll('.volCk').forEach(e=>{if(e.dataset.n===v)e.checked=cb.checked})});
+  containerBinds[i]=cb.checked?(info.binds||[]):[];
+  // 在容器行下方显示 bind 目录提示
+  const row=cb.closest('tr');
+  let note=row.nextSibling;
+  if(note&&note.classList&&note.classList.contains('bindnote'))note.remove();
+  if(cb.checked&&(info.binds||[]).length){
+    const tr=document.createElement('tr');tr.className='bindnote';
+    tr.innerHTML=`<td></td><td colspan="3" class="hint">宿主机目录(自动备份): ${info.binds.map(b=>esc(b.source)+' → '+esc(b.destination)).join('; ')}</td>`;
+    row.after(tr);
+  }
+}
+
+function sel(sel,attr){return [...document.querySelectorAll(sel)].filter(e=>e.checked).map(e=>e.getAttribute(attr))}
+
+async function startBackup(){
+  const cts=sel('#ctBody input[type=checkbox]','data-i').map(i=>(containers[+i].Names||'').split(',')[0]).filter(Boolean);
+  const imgs=[...new Set(sel('.imgCk','data-tag'))];
+  const vols=[...new Set(sel('.volCk','data-n'))];
+  const binds=[];
+  document.querySelectorAll('#ctBody input[type=checkbox]:checked').forEach(cb=>{
+    (containerBinds[+cb.dataset.i]||[]).forEach(b=>binds.push(b));
+  });
+  if(!cts.length&&!imgs.length&&!vols.length&&!binds.length){alert('请至少选择一项');return}
+  $('backupBtn').disabled=true;$('bkProg').style.display='block';$('bkResult').innerHTML='';
+  const r=await api('api/backup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({containers:cts,images:imgs,volumes:vols,binds:binds,snapshot:$('snapshotCk').checked})});
+  if(r.error){$('bkPhase').textContent='失败: '+r.error;$('backupBtn').disabled=false;return}
+  pollTask(r.task_id,'bk');
+}
+async function pollTask(tid,pfx){
+  const bar=$(pfx==='bk'?'bkProg':'rsProg').firstElementChild,ph=$(pfx==='bk'?'bkPhase':'rsPhase');
+  while(true){
+    const t=await api('api/task?id='+tid);
+    if(t.error){ph.textContent='失败: '+t.error;break}
+    bar.style.width=t.progress+'%';ph.textContent=t.phase||'';
+    if(t.status==='done'){
+      if(pfx==='bk')showBkDone(t);else showRsDone(t,tid);
+      break;
+    }
+    if(t.status==='failed'){ph.innerHTML='<div class="err">失败: '+esc(t.error||'')+'</div>';break}
+    await new Promise(r=>setTimeout(r,1500));
+  }
+  if(pfx==='bk')$('backupBtn').disabled=false;
+}
+function showBkDone(t){
+  let h='';
+  (t.warnings||[]).forEach(w=>h+=`<div class="warn">${esc(w)}</div>`);
+  h+=`<div class="toolbar"><a class="btn green" href="api/download?file=${encodeURIComponent(t.file)}">下载备份包 (${fmtSize(t.size)})</a><span class="hint">${esc(t.file)}</span></div>`;
+  $('bkResult').innerHTML=h;
+}
+async function loadBackups(){
+  const r=await api('api/backups');
+  $('fileList').innerHTML=(r.items||[]).map(f=>`<div class="row"><span class="mono">${esc(f.name)}</span><span>${fmtSize(f.size)}</span><a class="btn small green" href="api/download?file=${encodeURIComponent(f.name)}">下载</a><button class="btn small red" onclick="delBackup('${esc(f.name)}')">删除</button></div>`).join('')||'暂无备份文件';
+}
+async function delBackup(n){if(!confirm('删除 '+n+' ?'))return;await api('api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:n})});loadBackups()}
+
+function startRestore(){
+  const f=$('upFile').files[0];
+  if(!f){alert('请先选择备份包文件');return}
+  if(!/\.tar\.gz$|\.tgz$/.test(f.name)){alert('只支持 .tar.gz 备份包');return}
+  $('rsProg').style.display='block';$('rsResult').innerHTML='';
+  const xhr=new XMLHttpRequest();
+  const rc=$('recreateCk').checked?'&recreate=1':'';
+  const fc=($('recreateCk').checked&&$('forceCk').checked)?'&force=1':'';
+  xhr.open('POST',BASE+'api/restore?filename='+encodeURIComponent(f.name)+rc+fc);
+  xhr.upload.onprogress=e=>{if(e.lengthComputable){$('rsProg').firstElementChild.style.width=(e.loaded/e.total*50)+'%';$('rsPhase').textContent='上传中 '+Math.round(e.loaded/e.total*100)+'%'}};
+  xhr.onload=()=>{try{const r=JSON.parse(xhr.responseText);if(r.task_id)pollTask(r.task_id,'rs');else $('rsPhase').innerHTML='<div class="err">'+esc(r.error||'失败')+'</div>'}catch(e){$('rsPhase').innerHTML='<div class="err">请求失败</div>'}};
+  xhr.onerror=()=>$('rsPhase').innerHTML='<div class="err">网络错误</div>';
+  xhr.send(f);
+}
+function showRsDone(t,tid){
+  let h='';
+  (t.logs||[]).forEach(([n,ok,msg])=>h+=`<div>${ok?'✅':'❌'} ${esc(n)}${ok?'':' — '+esc(msg)}</div>`);
+  h=`<div class="card" style="margin-top:10px"><h2>恢复结果</h2>${h||'无内容'}<div class="hint">${esc(t.hint||'')}</div></div>`;
+  const rec=t.recreated||[];
+  if(rec.length){
+    h+=`<div class="card" style="margin-top:10px"><h2>容器重建</h2>`+rec.map((r,i)=>{
+      let row=`<div>${r.ok?'✅':'⚠️'} ${esc(r.name)} — ${esc(r.msg)}</div>`;
+      if(!r.ok&&/已存在/.test(r.msg)){
+        row+=`<div style="margin:6px 0 6px 20px"><input id="rn_${i}" placeholder="输入新名称，如 ${esc(r.name)}_bak" style="padding:6px;border:1px solid #ccc;border-radius:4px;width:220px"> <button class="btn small" onclick="renameRecreate('${tid}','${esc(r.name)}',${i})">换名重建</button> <span id="rnmsg_${i}" class="hint"></span><div class="hint">注意：原容器还在运行时，端口可能冲突导致启动失败，可先停掉原容器再换名重建。</div></div>`;
+      }
+      return row;
+    }).join('')+`</div>`;
+  }
+  const cmds=t.run_commands||{};
+  if(Object.keys(cmds).length){
+    h+=`<div class="card" style="margin-top:10px"><h2>容器重建命令（手动执行备用）</h2>`;
+    for(const [c,cmd] of Object.entries(cmds))h+=`<div class="hint"># ${esc(c)}</div><pre>${esc(cmd)}</pre>`;
+    h+=`</div>`;
+  }
+  $('rsResult').innerHTML=h;
+}
+async function renameRecreate(tid,container,i){
+  const nn=$('rn_'+i).value.trim();
+  const msg=$('rnmsg_'+i);
+  if(!nn){msg.textContent='请输入新名称';return}
+  msg.textContent='重建中…';
+  const r=await api('api/recreate-one',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:tid,container:container,new_name:nn})});
+  if(r.ok){msg.innerHTML='✅ '+esc(r.msg)}
+  else{msg.innerHTML='<span style="color:#d33">❌ '+esc(r.error||r.msg||'失败')+'</span>'}
+}
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+#!/bin/bash
+# Docker备份 - 飞牛OS原生应用启动脚本
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+SOCKET_PATH="${TRIM_APPDEST}/app.sock"
+SERVER_ENTRY="${TRIM_APPDEST}/server/server.py"
+DATA_DIR="${TRIM_PKGVAR}/data"
+
+APP_ROOT="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+APP_VER="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*//p' "${APP_ROOT}/manifest" 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+[ -n "${APP_VER}" ] || APP_VER="未知"
+
+mkdir -p "${TRIM_PKGVAR}" "${DATA_DIR}/backups" "${DATA_DIR}/tasks" 2>/dev/null
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}" 2>/dev/null
+    echo "$1"
+}
+
+report_error() {
+    log_msg "ERROR: $1"
+    [ -n "${TRIM_TEMP_LOGFILE:-}" ] && printf "%s\n" "$1" > "${TRIM_TEMP_LOGFILE}"
+}
+
+is_running() {
+    [ -r "${PID_FILE}" ] || return 1
+    local pid
+    pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+    case "${pid}" in ""|*[!0-9]*) return 1 ;; esac
+    kill -0 "${pid}" 2>/dev/null
+}
+
+start_app() {
+    stop_app >/dev/null 2>&1
+    log_msg "==== 启动 Docker备份 v${APP_VER} ===="
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        report_error "python3 未找到"
+        return 1
+    fi
+    log_msg "python3: $(python3 --version 2>&1)"
+    if [ ! -f "${SERVER_ENTRY}" ]; then
+        report_error "server.py 不存在: ${SERVER_ENTRY}"
+        return 1
+    fi
+    if ! command -v docker >/dev/null 2>&1; then
+        log_msg "警告: docker 命令未找到，备份功能将不可用"
+    else
+        log_msg "docker: $(docker --version 2>&1 | head -n 1)"
+    fi
+
+    rm -f "${SOCKET_PATH}"
+    chmod +x "${SERVER_ENTRY}"
+
+    setsid bash -c "
+        export FNOS_SOCKET_PATH='${SOCKET_PATH}'
+        export TRIM_APPDEST='${TRIM_APPDEST}'
+        export TRIM_PKGVAR='${TRIM_PKGVAR}'
+        exec python3 '${SERVER_ENTRY}'
+    " >> "${LOG_FILE}" 2>&1 < /dev/null &
+
+    printf "%s" "$!" > "${PID_FILE}"
+    log_msg "进程已启动, PID: $!"
+
+    sleep 2
+    if ! is_running; then
+        report_error "进程启动后立即退出，查看日志"
+        return 1
+    fi
+    if [ ! -S "${SOCKET_PATH}" ]; then
+        sleep 3
+        [ -S "${SOCKET_PATH}" ] || { report_error "socket 文件未生成"; return 1; }
+    fi
+    log_msg "启动成功，socket 已就绪"
+    return 0
+}
+
+stop_app() {
+    log_msg "停止服务..."
+    local pids
+    pids="$(pgrep -f "${SERVER_ENTRY}" 2>/dev/null | tr '\n' ' ')"
+    if [ -n "${pids}" ]; then
+        log_msg "终止进程: ${pids}"
+        pkill -TERM -f "${SERVER_ENTRY}" 2>/dev/null || true
+        local count=0
+        while pgrep -f "${SERVER_ENTRY}" >/dev/null 2>&1 && [ "${count}" -lt 10 ]; do
+            sleep 1; count=$((count + 1))
+        done
+        pgrep -f "${SERVER_ENTRY}" >/dev/null 2>&1 && pkill -KILL -f "${SERVER_ENTRY}" 2>/dev/null || true
+    fi
+    rm -f "${PID_FILE}" "${SOCKET_PATH}"
+    log_msg "已停止"
+    return 0
+}
+
+status_app() {
+    if is_running; then return 0; fi
+    rm -f "${PID_FILE}" "${SOCKET_PATH}"
+    return 1
+}
+
+case "${1:-}" in
+    start)  start_app; exit $? ;;
+    stop)   stop_app; exit $? ;;
+    status) status_app && exit 0 || exit 3 ;;
+    *) echo "用法: $0 {start|stop|status}"; exit 1 ;;
+esac

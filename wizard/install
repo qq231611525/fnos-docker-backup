@@ -1,0 +1,1 @@
+[{"items":[{"helpText":"一键完整备份 Docker：<b>镜像</b>（docker save）、<b>数据卷</b>、<b>容器配置</b>（docker inspect），打包成单个 .tar.gz 文件下载。","type":"tips"},{"helpText":"换机器后，在新机器安装本插件，上传备份包即可一键恢复镜像和数据卷；包内自带 restore.sh，即使不装插件也能手动恢复。","type":"tips"},{"helpText":"本应用需要 <b>root 权限</b>才能执行 docker 命令，仅用于备份/恢复操作，不联网、不上传任何数据。","type":"tips"}],"stepTitle":"欢迎使用 Docker备份"}]

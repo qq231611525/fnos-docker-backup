@@ -1,0 +1,8 @@
+#!/bin/bash
+# Docker备份 - 卸载回调：停止服务，备份文件保留与否由卸载向导决定
+LOG_FILE="${TRIM_TEMP_LOGFILE:-/tmp/dockerbackup-uninstall.log}"
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}" 2>/dev/null; }
+log_msg "卸载回调开始"
+"${TRIM_APPDEST}/../cmd/main" stop 2>/dev/null || "${0%/*}/main" stop 2>/dev/null || true
+log_msg "卸载回调完成"
+exit 0
