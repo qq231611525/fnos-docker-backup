@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -21,7 +22,7 @@ from http.server import BaseHTTPRequestHandler
 from socketserver import UnixStreamServer
 
 # ---------- 路径与环境 ----------
-PLUGIN_VERSION = "1.3.4"  # 发版时与 manifest 中的 version 保持一致
+PLUGIN_VERSION = "1.4.0"  # 发版时与 manifest 中的 version 保持一致
 APPDEST = os.environ.get("TRIM_APPDEST", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PKGVAR = os.environ.get("TRIM_PKGVAR", os.path.join(tempfile.gettempdir(), "dockerbackup"))
 SOCKET_PATH = os.environ.get("FNOS_SOCKET_PATH", os.path.join(APPDEST, "app.sock"))
@@ -58,6 +59,17 @@ def docker_ok():
     return rc == 0, out
 
 
+def dir_size(path):
+    """目录占用字节数（du -sb），失败返回 None"""
+    try:
+        rc, out, _ = run(["du", "-sb", path], timeout=120)
+        if rc == 0 and out:
+            return int(out.split()[0])
+    except Exception:
+        pass
+    return None
+
+
 def docker_root_dir():
     rc, out, _ = run([DOCKER, "info", "--format", "{{.DockerRootDir}}"], timeout=15)
     if rc == 0 and out:
@@ -72,11 +84,119 @@ def safe_filename(name):
     return base
 
 
+# ---------- 任务持久化（v1.4.0：任务状态落盘，关页面/服务重启不丢） ----------
+def task_file(tid):
+    return os.path.join(TASK_DIR, "task-%s.json" % tid)
+
+
+def save_task(tid):
+    t = tasks.get(tid)
+    if t is None:
+        return
+    try:
+        tmpf = task_file(tid) + ".tmp"
+        with open(tmpf, "w") as f:
+            json.dump(t, f, ensure_ascii=False)
+        os.replace(tmpf, task_file(tid))
+    except Exception:
+        pass
+
+
+def load_task(tid):
+    try:
+        with open(task_file(tid)) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def get_task(tid):
+    """内存与落盘两份取更新的一份：干活的是 worker 进程，它只写文件，
+    服务进程内存里那份是启动任务时的旧快照，必须以文件为准。"""
+    with tasks_lock:
+        mem = tasks.get(tid)
+    disk = load_task(tid)
+    if disk and (mem is None or disk.get("updated", 0) >= mem.get("updated", 0)):
+        with tasks_lock:
+            tasks[tid] = disk
+        return disk
+    return mem
+
+
+def list_tasks(limit=10):
+    tids = set()
+    with tasks_lock:
+        tids.update(tasks.keys())
+    try:
+        for fn in os.listdir(TASK_DIR):
+            if fn.startswith("task-") and fn.endswith(".json"):
+                tids.add(fn[len("task-"):-len(".json")])
+    except Exception:
+        pass
+    arr = []
+    for tid in tids:
+        t = get_task(tid)
+        if t:
+            arr.append(t)
+    arr.sort(key=lambda t: t.get("started", 0), reverse=True)
+    return arr[:limit]
+
+
 def update_task(tid, **kw):
     with tasks_lock:
         t = tasks.get(tid)
         if t:
             t.update(kw)
+            t["updated"] = time.time()
+    save_task(tid)
+
+
+# ---------- 后台工作进程（v1.4.0：备份/恢复在独立进程里跑，关页面、关窗口、服务重启都不中断） ----------
+def spawn_worker(kind, params):
+    tid = hashlib.md5(("%s-%s-%s" % (time.time(), os.getpid(), kind)).encode()).hexdigest()[:12]
+    with tasks_lock:
+        tasks[tid] = {"id": tid, "type": kind, "status": "queued",
+                      "phase": "排队", "progress": 0, "warnings": [],
+                      "started": time.time(), "updated": time.time()}
+    save_task(tid)
+    spec = {"kind": kind, "tid": tid, "params": params}
+    specf = os.path.join(TASK_DIR, "spec-%s.json" % tid)
+    with open(specf, "w") as f:
+        json.dump(spec, f)
+    logf = open(os.path.join(TASK_DIR, "task-%s.log" % tid), "ab")
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--worker", specf],
+                     stdout=logf, stderr=subprocess.STDOUT,
+                     start_new_session=True, cwd="/")
+    log("已启动后台任务 %s (%s)" % (tid, kind))
+    return tid
+
+
+def worker_main(specf):
+    with open(specf) as f:
+        spec = json.load(f)
+    tid, kind, params = spec["tid"], spec["kind"], spec["params"]
+    t = load_task(tid) or {"id": tid, "type": kind, "status": "queued",
+                           "phase": "排队", "progress": 0, "warnings": []}
+    with tasks_lock:
+        tasks[tid] = t
+    try:
+        if kind == "backup":
+            do_backup(tid, params.get("images", []), params.get("volumes", []),
+                      params.get("containers", []), params.get("binds", []),
+                      params.get("snapshot", False))
+        elif kind == "restore":
+            do_restore(tid, params["pkg_path"], params.get("recreate", False),
+                       params.get("force", False))
+            if params.get("cleanup_pkg"):
+                try:
+                    os.unlink(params["pkg_path"])
+                except Exception:
+                    pass
+    finally:
+        try:
+            os.unlink(specf)
+        except Exception:
+            pass
 
 
 # ---------- docker 查询 ----------
@@ -619,17 +739,19 @@ class Handler(BaseHTTPRequestHandler):
             if not ins:
                 return self.send_json({"error": err}, 500)
             vols = [m["Name"] for m in ins.get("Mounts", []) if m.get("Type") == "volume"]
-            binds = [{"source": m["Source"], "destination": m["Destination"]}
+            binds = [{"source": m["Source"], "destination": m["Destination"],
+                      "size": dir_size(m["Source"])}
                      for m in ins.get("Mounts", []) if m.get("Type") == "bind" and m.get("Source")]
             img = (ins.get("Config") or {}).get("Image", "")
             return self.send_json({"volumes": vols, "binds": binds, "image": img})
         if path == "/api/task":
             tid = qs.get("id", [""])[0]
-            with tasks_lock:
-                t = tasks.get(tid)
+            t = get_task(tid)
             if not t:
                 return self.send_json({"error": "任务不存在"}, 404)
             return self.send_json(t)
+        if path == "/api/tasks":
+            return self.send_json({"items": list_tasks()})
         if path == "/api/backups":
             files = []
             for f in sorted(os.listdir(BACKUP_DIR), reverse=True):
@@ -685,12 +807,9 @@ class Handler(BaseHTTPRequestHandler):
             snapshot = body.get("snapshot", False) is True
             if not images and not volumes and not containers and not binds:
                 return self.send_json({"error": "请至少选择一项"}, 400)
-            tid = hashlib.md5(str(time.time()).encode()).hexdigest()[:12]
-            with tasks_lock:
-                tasks[tid] = {"id": tid, "type": "backup", "status": "queued",
-                              "phase": "排队", "progress": 0, "warnings": []}
-            th = threading.Thread(target=do_backup, args=(tid, images, volumes, containers, binds, snapshot), daemon=True)
-            th.start()
+            tid = spawn_worker("backup", {"images": images, "volumes": volumes,
+                                          "containers": containers, "binds": binds,
+                                          "snapshot": snapshot})
             return self.send_json({"task_id": tid})
 
         if path == "/api/restore":
@@ -718,12 +837,25 @@ class Handler(BaseHTTPRequestHandler):
             if not tarfile.is_tarfile(tmpf):
                 os.unlink(tmpf)
                 return self.send_json({"error": "文件不是有效的 tar.gz"}, 400)
-            tid = hashlib.md5(str(time.time()).encode()).hexdigest()[:12]
-            with tasks_lock:
-                tasks[tid] = {"id": tid, "type": "restore", "status": "queued",
-                              "phase": "排队", "progress": 0}
-            th = threading.Thread(target=do_restore, args=(tid, tmpf, recreate, force), daemon=True)
-            th.start()
+            tid = spawn_worker("restore", {"pkg_path": tmpf, "recreate": recreate,
+                                            "force": force, "cleanup_pkg": True})
+            return self.send_json({"task_id": tid})
+
+        if path == "/api/restore-local":
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                return self.send_json({"error": "请求体解析失败"}, 400)
+            fname = safe_filename(body.get("file", ""))
+            if not fname:
+                return self.send_json({"error": "非法文件名"}, 400)
+            fp = os.path.join(BACKUP_DIR, fname)
+            if not os.path.isfile(fp):
+                return self.send_json({"error": "备份文件不存在"}, 404)
+            tid = spawn_worker("restore", {"pkg_path": fp,
+                                            "recreate": body.get("recreate") is True,
+                                            "force": body.get("force") is True,
+                                            "cleanup_pkg": False})
             return self.send_json({"task_id": tid})
 
         if path == "/api/delete":
@@ -773,8 +905,7 @@ class Handler(BaseHTTPRequestHandler):
             new_name = body.get("new_name", "")
             if not new_name or not SAFE_NAME.match(new_name):
                 return self.send_json({"error": "新名称不合法（字母数字下划线，字母开头）"}, 400)
-            with tasks_lock:
-                t = tasks.get(tid)
+            t = get_task(tid)
             if not t:
                 return self.send_json({"error": "任务已过期，请重新恢复"}, 400)
             run_argv = t.get("run_argv", {}) or {}
@@ -832,4 +963,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 2 and sys.argv[1] == "--worker":
+        worker_main(sys.argv[2])
+    else:
+        main()

@@ -1,7 +1,7 @@
 appname               = dockerbackup
-version               = 1.3.4
-sub_version           = 1.3.4
-display_name          = Docker备份 v1.3.4
+version               = 1.4.0
+sub_version           = 1.4.0
+display_name          = Docker备份 v1.4.0
 desc                  = 一键完整备份 Docker：镜像（docker save）、数据卷、容器配置（docker inspect），打包成单个文件下载；换机器后上传即可一键恢复，包内自带 restore.sh 也可手动恢复。
 platform              = all
 source                = thirdparty
@@ -11,4 +11,4 @@ desktop_uidir         = ui
 desktop_applaunchname = dockerbackup.APPLICATION
 checkport             = false
 ctl_stop              = true
-changelog             = V1.1.0：恢复页新增“自动重建容器”选项，上传备份包后可一键按原配置 docker run 启动容器（自动补建缺失网络，同名容器跳过）。
+changelog             = V1.4.0：①备份/恢复改为独立后台进程+任务状态落盘，关页面、关窗口、应用重启都不中断，重开页面自动接回进度；②宿主机目录(bind挂载)默认不再打包，逐条勾选并显示大小，勾选合计超2GB会先提醒（修复备份包把音乐等大目录一起打包、体积爆炸的问题）；③容器/镜像/数据卷三表加全选，新增“一键备份全部容器”；④备份文件页可直接点“恢复”用本机备份包恢复，跨机器恢复说明同步写明。

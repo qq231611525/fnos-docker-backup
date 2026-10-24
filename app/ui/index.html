@@ -57,24 +57,26 @@ input[type=file]{font-size:13px}
   <!-- 备份 -->
   <div id="tab-backup">
     <div class="card">
-      <h2>容器 <span class="hint">勾选容器会自动带上它的镜像、命名卷和宿主机目录(bind挂载)</span></h2>
-      <table><thead><tr><th></th><th>名称</th><th>镜像</th><th>状态</th></tr></thead>
+      <h2>容器 <span class="hint">勾选容器会自动带上它的镜像和命名卷；宿主机目录(bind挂载)默认不备份，需要时在容器下方单独勾选</span></h2>
+      <table><thead><tr><th><input type="checkbox" id="ctAll" title="全选" onchange="toggleAllCt(this)"></th><th>名称</th><th>镜像</th><th>状态</th></tr></thead>
       <tbody id="ctBody"><tr><td colspan="4">加载中…</td></tr></tbody></table>
     </div>
     <div class="card">
       <h2>镜像</h2>
-      <table><thead><tr><th></th><th>仓库:标签</th><th>大小</th></tr></thead>
+      <table><thead><tr><th><input type="checkbox" id="imgAll" title="全选" onchange="toggleAll('.imgCk',this)"></th><th>仓库:标签</th><th>大小</th></tr></thead>
       <tbody id="imgBody"><tr><td colspan="3">加载中…</td></tr></tbody></table>
     </div>
     <div class="card">
       <h2>数据卷 <button class="btn small red" onclick="pruneVolumes()">清理所有孤立卷</button></h2>
-      <table><thead><tr><th></th><th>名称</th><th>占用容器</th><th>驱动</th><th>操作</th></tr></thead>
+      <table><thead><tr><th><input type="checkbox" id="volAll" title="全选" onchange="toggleAll('.volCk',this)"></th><th>名称</th><th>占用容器</th><th>驱动</th><th>操作</th></tr></thead>
       <tbody id="volBody"><tr><td colspan="5">加载中…</td></tr></tbody></table>
       <div class="toolbar">
         <label><input type="checkbox" id="snapshotCk" checked> 快照容器文件系统（保存容器内改过的配置文件）</label>
       </div>
       <div class="toolbar">
         <button class="btn" id="backupBtn" onclick="startBackup()">开始备份</button>
+        <button class="btn green" id="backupAllBtn" onclick="backupAll()">一键备份全部容器</button>
+        <span class="hint">备份在后台运行，开始后可以放心关掉这个页面，回来打开会继续显示进度。</span>
       </div>
       <div class="progress" id="bkProg"><div></div></div>
       <div class="phase" id="bkPhase"></div>
@@ -87,7 +89,7 @@ input[type=file]{font-size:13px}
     <div class="card">
       <h2>备份文件 <button class="btn small" onclick="loadBackups()">刷新</button></h2>
       <div class="filelist" id="fileList">加载中…</div>
-      <div class="hint">备份包下载后拿到另一台机器，在「恢复」页上传即可导入使用。</div>
+      <div class="hint">点「恢复」可直接用本机存着的备份包恢复（是否自动重建容器按「恢复」页的勾选）。备份包下载后拿到另一台机器装本插件，在「恢复」页上传即可恢复：镜像、数据卷、宿主机目录都会按原路径自动创建，不用再配置一遍。</div>
     </div>
   </div>
 
@@ -112,7 +114,7 @@ const $=id=>document.getElementById(id);
 // 网关前缀自适应：页面在 /app/dockerbackup/ 下，API 用相对路径避免绕过网关
 const BASE=(()=>{let p=window.location.pathname;return p.endsWith('/')?p:p+'/';})();
 let containers=[], images=[], volumes=[];
-let containerBinds={};  // container idx -> [{source,destination}]
+let containerBinds={};  // container idx -> [{source,destination,size}]（该容器全部 bind，勾选与否看 .bindCk）
 
 function showTab(t){
   document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
@@ -145,6 +147,27 @@ async function init(){
     const delBtn=used.length?'':`<button class="btn small red" onclick="rmVolume('${esc(v.Name)}')">删除</button>`;
     return `<tr><td><input type="checkbox" data-n="${esc(v.Name)}" class="volCk"></td><td class="mono">${esc(v.Name)}</td><td>${usedHtml}</td><td>${esc(v.Driver)}</td><td>${delBtn}</td></tr>`;
   }).join('')||'<tr><td colspan="5">无数据卷</td></tr>';
+  resumeTask();
+}
+async function resumeTask(){
+  // 关页面重开后，把正在跑（或刚跑完）的后台任务进度接回来
+  try{
+    const tl=await api('api/tasks');
+    const t=(tl.items||[])[0];
+    if(!t)return;
+    const fresh=Date.now()/1000-(t.updated||0)<900;
+    if(t.status==='running'||t.status==='queued'||(t.status==='done'&&fresh)){
+      if(t.type==='backup'){
+        $('bkProg').style.display='block';
+        if(t.status!=='done'){$('backupBtn').disabled=true;$('backupAllBtn').disabled=true}
+        pollTask(t.id,'bk');
+      }else if(t.type==='restore'){
+        gotoRestoreTab();
+        $('rsProg').style.display='block';
+        pollTask(t.id,'rs');
+      }
+    }
+  }catch(e){}
 }
 async function rmVolume(n){
   if(!confirm('删除数据卷 '+n+' ?\n卷内数据将永久丢失!'))return;
@@ -157,22 +180,32 @@ async function pruneVolumes(){
   if(r.ok){alert('清理完成');init()}else{alert('清理失败: '+(r.error||''))}
 }
 
+function toggleAll(sel,el){document.querySelectorAll(sel).forEach(e=>e.checked=el.checked)}
+async function toggleAllCt(el){
+  const cbs=[...document.querySelectorAll('#ctBody input[type=checkbox]')];
+  for(const cb of cbs){cb.checked=el.checked;await onCt(cb)}
+}
 async function onCt(cb){
   const i=+cb.dataset.i, c=containers[i];if(!c)return;
   const info=await api('api/container-volumes?name='+encodeURIComponent((c.Names||'').split(',')[0]));
   const imgTag=c.Image;
   document.querySelectorAll('.imgCk').forEach(e=>{if(e.dataset.tag===imgTag||e.dataset.tag.startsWith(imgTag+':'))e.checked=cb.checked});
   (info.volumes||[]).forEach(v=>{document.querySelectorAll('.volCk').forEach(e=>{if(e.dataset.n===v)e.checked=cb.checked})});
-  containerBinds[i]=cb.checked?(info.binds||[]):[];
-  // 在容器行下方显示 bind 目录提示
+  containerBinds[i]=info.binds||[];
+  // 在容器行下方逐条列出 bind 目录：默认不勾选，勾上才打包，并显示大小
   const row=cb.closest('tr');
   let note=row.nextSibling;
   if(note&&note.classList&&note.classList.contains('bindnote'))note.remove();
   if(cb.checked&&(info.binds||[]).length){
     const tr=document.createElement('tr');tr.className='bindnote';
-    tr.innerHTML=`<td></td><td colspan="3" class="hint">宿主机目录(自动备份): ${info.binds.map(b=>esc(b.source)+' → '+esc(b.destination)).join('; ')}</td>`;
+    tr.innerHTML=`<td></td><td colspan="3"><div class="hint" style="margin-bottom:4px">宿主机目录(bind挂载)默认<b>不</b>备份——像音乐、影视这类大目录一般不用打包；确实需要时再勾选：</div>${info.binds.map((b,j)=>`<label style="display:block;font-size:13px;margin:3px 0"><input type="checkbox" class="bindCk" data-i="${i}" data-j="${j}"> <span class="mono">${esc(b.source)}</span> → ${esc(b.destination)} <span class="hint">(${(b.size==null?'大小未知':'约 '+fmtSize(b.size))})</span></label>`).join('')}</td>`;
     row.after(tr);
   }
+}
+async function backupAll(){
+  $('ctAll').checked=true;
+  await toggleAllCt($('ctAll'));
+  startBackup();
 }
 
 function sel(sel,attr){return [...document.querySelectorAll(sel)].filter(e=>e.checked).map(e=>e.getAttribute(attr))}
@@ -181,12 +214,14 @@ async function startBackup(){
   const cts=sel('#ctBody input[type=checkbox]','data-i').map(i=>(containers[+i].Names||'').split(',')[0]).filter(Boolean);
   const imgs=[...new Set(sel('.imgCk','data-tag'))];
   const vols=[...new Set(sel('.volCk','data-n'))];
-  const binds=[];
-  document.querySelectorAll('#ctBody input[type=checkbox]:checked').forEach(cb=>{
-    (containerBinds[+cb.dataset.i]||[]).forEach(b=>binds.push(b));
+  const binds=[];let bindBytes=0;
+  document.querySelectorAll('.bindCk:checked').forEach(ck=>{
+    const b=(containerBinds[+ck.dataset.i]||[])[+ck.dataset.j];
+    if(b){binds.push({source:b.source,destination:b.destination});if(b.size)bindBytes+=b.size}
   });
   if(!cts.length&&!imgs.length&&!vols.length&&!binds.length){alert('请至少选择一项');return}
-  $('backupBtn').disabled=true;$('bkProg').style.display='block';$('bkResult').innerHTML='';
+  if(bindBytes>2e9&&!confirm('你勾选的宿主机目录合计约 '+fmtSize(bindBytes)+'，备份包会变得很大，确定要把它们一起打包吗？'))return;
+  $('backupBtn').disabled=true;$('backupAllBtn').disabled=true;$('bkProg').style.display='block';$('bkResult').innerHTML='';
   const r=await api('api/backup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({containers:cts,images:imgs,volumes:vols,binds:binds,snapshot:$('snapshotCk').checked})});
   if(r.error){$('bkPhase').textContent='失败: '+r.error;$('backupBtn').disabled=false;return}
   pollTask(r.task_id,'bk');
@@ -204,7 +239,7 @@ async function pollTask(tid,pfx){
     if(t.status==='failed'){ph.innerHTML='<div class="err">失败: '+esc(t.error||'')+'</div>';break}
     await new Promise(r=>setTimeout(r,1500));
   }
-  if(pfx==='bk')$('backupBtn').disabled=false;
+  if(pfx==='bk'){$('backupBtn').disabled=false;$('backupAllBtn').disabled=false}
 }
 function showBkDone(t){
   let h='';
@@ -214,7 +249,19 @@ function showBkDone(t){
 }
 async function loadBackups(){
   const r=await api('api/backups');
-  $('fileList').innerHTML=(r.items||[]).map(f=>`<div class="row"><span class="mono">${esc(f.name)}</span><span>${fmtSize(f.size)}</span><a class="btn small green" href="api/download?file=${encodeURIComponent(f.name)}">下载</a><button class="btn small red" onclick="delBackup('${esc(f.name)}')">删除</button></div>`).join('')||'暂无备份文件';
+  $('fileList').innerHTML=(r.items||[]).map(f=>`<div class="row"><span class="mono">${esc(f.name)}</span><span>${fmtSize(f.size)}</span><button class="btn small" onclick="restoreLocal('${esc(f.name)}')">恢复</button><a class="btn small green" href="api/download?file=${encodeURIComponent(f.name)}">下载</a><button class="btn small red" onclick="delBackup('${esc(f.name)}')">删除</button></div>`).join('')||'暂无备份文件';
+}
+function gotoRestoreTab(){
+  document.querySelectorAll('.tab').forEach((e,idx)=>e.classList.toggle('active',idx===2));
+  ['backup','files','restore'].forEach(x=>$('tab-'+x).classList.toggle('hidden',x!=='restore'));
+}
+async function restoreLocal(name){
+  if(!confirm('用备份包 '+name+' 恢复？\n将导入镜像、还原数据卷'+($('recreateCk').checked?'，并按「恢复」页勾选自动重建容器':'')+'。'))return;
+  const r=await api('api/restore-local',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:name,recreate:$('recreateCk').checked,force:$('recreateCk').checked&&$('forceCk').checked})});
+  if(r.error){alert('恢复启动失败: '+r.error);return}
+  gotoRestoreTab();
+  $('rsProg').style.display='block';$('rsResult').innerHTML='';
+  pollTask(r.task_id,'rs');
 }
 async function delBackup(n){if(!confirm('删除 '+n+' ?'))return;await api('api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:n})});loadBackups()}
 
